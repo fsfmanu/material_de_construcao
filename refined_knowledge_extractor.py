@@ -1,0 +1,170 @@
+import os
+import spacy
+import json
+import re
+
+nlp = spacy.load("pt_core_news_sm")
+
+def clean_text(text):
+    # Remover múltiplos espaços em branco e quebras de linha
+    text = re.sub(r'\s+', ' ', text).strip()
+    # Remover caracteres especiais indesejados, mas manter alguns para números e unidades
+    # Movendo o hífen para o final do conjunto de caracteres para evitar erro de range
+    text = re.sub(r'[^a-zA-Z0-9áéíóúâêôãõüçÁÉÍÓÚÂÊÔÕÜÇ.,;:/% m²Lhkg-]', '', text)
+    return text
+
+def extract_product_info_refined(text, filename):
+    original_text = text # Manter o texto original para descrição
+    text = clean_text(text)
+    doc = nlp(text)
+    info = {
+        "filename": filename,
+        "brand": "",
+        "product_name": "",
+        "type": "",
+        "coverage": "",
+        "drying_time": "",
+        "dilution": "",
+        "application_tools": [],
+        "use_case": [],
+        "features": [],
+        "description": ""
+    }
+
+    # Tentar extrair marca do nome do arquivo ou do texto
+    filename_lower = filename.lower()
+    if "coral" in filename_lower or "coral" in text.lower():
+        info["brand"] = "Coral"
+    elif "suvinil" in filename_lower or "suvinil" in text.lower():
+        info["brand"] = "Suvinil"
+    elif "sherwin" in filename_lower or "sherwin" in text.lower():
+        info["brand"] = "Sherwin-Williams"
+    elif "elit" in filename_lower or "elit" in text.lower():
+        info["brand"] = "Elit"
+    elif "ppg" in filename_lower or "ppg" in text.lower():
+        info["brand"] = "PPG"
+    elif "basf" in filename_lower or "basf" in text.lower():
+        info["brand"] = "BASF"
+
+    # Extração de nome do produto (mais robusta)
+    product_name_candidates = []
+    
+    # 1. Tentar encontrar nomes de produtos capitalizados perto da marca
+    if info["brand"]:
+        brand_pattern = re.escape(info["brand"])
+        # Procura por Brand + (palavra capitalizada ou sequência de palavras capitalizadas)
+        matches = re.findall(rf'{brand_pattern}\s+([A-Z][a-zA-Z0-9\s-]+?)(?:\s+(?:tinta|esmalte|verniz|selador|massa|primer|acrílica|látex|epóxi|sintético|premium|econômica|automotiva|residencial|base)|\s*\(|\s*\d|\s*\b|$)', text, re.IGNORECASE)
+        if matches:
+            product_name_candidates.extend([m.strip() for m in matches])
+
+    # 2. Padrões mais genéricos para nomes de produtos (Tinta X, Esmalte Y)
+    matches = re.findall(r'(?:tinta|esmalte|verniz|selador|massa|primer)\s+([A-Z][a-zA-Z0-9\s-]+?)(?:\s+(?:acrílica|látex|epóxi|sintético|premium|econômica|automotiva|residencial|base)|\s*\(|\s*\d|\s*\b|$)', text, re.IGNORECASE)
+    if matches:
+        product_name_candidates.extend([m.strip() for m in matches])
+
+    # 3. Tentar extrair do nome do arquivo se não encontrou no texto
+    if not product_name_candidates:
+        file_product_name = os.path.splitext(filename)[0].replace("_", " ").replace("-", " ").title()
+        if info["brand"] and file_product_name.lower().startswith(info["brand"].lower()):
+            file_product_name = file_product_name[len(info["brand"]):].strip()
+        product_name_candidates.append(file_product_name)
+
+    # Filtrar e selecionar o melhor nome de produto
+    if product_name_candidates:
+        generic_terms = ["tinta", "esmalte", "verniz", "selador", "massa", "primer", "catalogo", "boletim tecnico", "ficha tecnica", "manual", "brochura", "pdf", "2020", "2021", "2022", "2023", "2024", "2025", "completo", "profissional", "super", "rendimento", "revela", "final", "nacionais", "demarchi", "min", "thumb", "bt"]
+        cleaned_candidates = []
+        for name in product_name_candidates:
+            cleaned_name = name
+            for term in generic_terms:
+                cleaned_name = re.sub(r'\b' + term + r'\b', '', cleaned_name, flags=re.IGNORECASE).strip()
+            cleaned_name = re.sub(r'\s+', ' ', cleaned_name).strip()
+            if cleaned_name and len(cleaned_name) > 2: # Nome do produto deve ter pelo menos 3 caracteres
+                cleaned_candidates.append(cleaned_name)
+        
+        if cleaned_candidates:
+            # Escolher o candidato mais longo e que não seja apenas números
+            info["product_name"] = max(cleaned_candidates, key=len)
+        else:
+            info["product_name"] = product_name_candidates[0] # Fallback
+
+    # Extração de tipo (residencial/automotiva)
+    if re.search(r'automotiva|repintura automotiva|veículos|automóveis', text, re.IGNORECASE):
+        info["type"] = "Automotiva"
+    elif re.search(r'residencial|paredes|tetos|pisos|imóveis|construção civil|interior|exterior', text, re.IGNORECASE):
+        info["type"] = "Residencial"
+
+    # Extração de rendimento (coverage)
+    coverage_matches = re.findall(r'rendimento(?:\s+de)?\s*(\d+[.,]?\d*\s*m²(?:/l| por litro)?(?:\s+por\s+demão)?(?:\s+e\s+\d+[.,]?\d*\s*m²(?:/l| por litro)?)?)', text, re.IGNORECASE)
+    if coverage_matches:
+        info["coverage"] = "; ".join(list(set(c.replace(',', '.') for c in coverage_matches)))
+    else:
+        coverage_matches = re.findall(r'(\d+[.,]?\d*\s*m²(?:/l| por litro)?(?:\s+por\s+demão)?(?:\s+e\s+\d+[.,]?\d*\s*m²(?:/l| por litro)?)?)', text, re.IGNORECASE)
+        if coverage_matches:
+            info["coverage"] = "; ".join(list(set(c.replace(',', '.') for c in coverage_matches)))
+
+    # Extração de tempo de secagem (drying_time)
+    drying_time_matches = re.findall(r'(?:secagem|tempo de secagem):\s*(.*?)(?:\.|\n|\r|\bandes\b)', text, re.IGNORECASE)
+    if drying_time_matches:
+        info["drying_time"] = "; ".join(list(set(d.strip() for d in drying_time_matches)))
+    else:
+        drying_time_matches = re.findall(r'(?:ao toque|entre demãos|final):\s*(\d+\s*(?:min|horas|dias))', text, re.IGNORECASE)
+        if drying_time_matches:
+            info["drying_time"] = "; ".join(list(set(d.strip() for d in drying_time_matches)))
+
+    # Extração de diluição (dilution)
+    dilution_matches = re.findall(r'(?:diluição|diluir):\s*(.*?)(?:\.|\n|\r|\baplicação\b)', text, re.IGNORECASE)
+    if dilution_matches:
+        info["dilution"] = "; ".join(list(set(d.strip() for d in dilution_matches)))
+    else:
+        dilution_matches = re.findall(r'(\d+-\d+%\s+com\s+\w+)', text, re.IGNORECASE)
+        if dilution_matches:
+            info["dilution"] = "; ".join(list(set(d.strip() for d in dilution_matches)))
+
+    # Extração de ferramentas de aplicação (application_tools)
+    tools_keywords = ["rolo", "pincel", "trincha", "pistola", "desempenadeira", "espátula", "airless"]
+    for keyword in tools_keywords:
+        if re.search(r'\b' + keyword + r'\b', text, re.IGNORECASE) and keyword.capitalize() not in info["application_tools"]:
+            info["application_tools"].append(keyword.capitalize())
+
+    # Extração de uso (use_case)
+    use_case_keywords = ["internas", "externas", "madeira", "metal", "alvenaria", "gesso", "drywall", "concreto", "fibrocimento", "azulejo", "telhado", "piso", "ferro", "aço"]
+    for keyword in use_case_keywords:
+        if re.search(r'\b' + keyword + r'\b', text, re.IGNORECASE) and keyword.capitalize() not in info["use_case"]:
+            info["use_case"].append(keyword.capitalize())
+
+    # Extração de características (features)
+    feature_keywords = ["lavável", "acrílica", "epóxi", "sintética", "fosca", "semibrilho", "brilhante", "acetinada", "premium", "econômica", "antimofo", "antibactéria", "resistente", "durável", "secagem rápida", "sem cheiro", "base água", "base solvente", "cobertura", "rendimento", "flexível", "impermeável", "antiderrapante"]
+    for keyword in feature_keywords:
+        if re.search(r'\b' + keyword + r'\b', text, re.IGNORECASE) and keyword.capitalize() not in info["features"]:
+            info["features"].append(keyword.capitalize())
+
+    # Extração de uma breve descrição (primeiras frases ou parágrafos do texto original)
+    sentences = [s.text for s in nlp(original_text).sents if len(s.text.strip()) > 10]
+    if sentences:
+        info["description"] = " ".join(sentences[:3]) # Pegar as três primeiras frases como descrição
+
+    return info
+
+if __name__ == "__main__":
+    extracted_texts_dir = "/home/ubuntu/extracted_texts"
+    structured_knowledge = []
+
+    for filename in os.listdir(extracted_texts_dir):
+        if filename.endswith(".txt"):
+            filepath = os.path.join(extracted_texts_dir, filename)
+            with open(filepath, "r", encoding="utf-8") as f:
+                text = f.read()
+            
+            knowledge_entry = extract_product_info_refined(text, filename)
+            structured_knowledge.append(knowledge_entry)
+
+    output_json_path = "/home/ubuntu/structured_knowledge_refined.json"
+    with open(output_json_path, "w", encoding="utf-8") as f:
+        json.dump(structured_knowledge, f, ensure_ascii=False, indent=4)
+
+    print(f"Base de conhecimento estruturada (refinada) salva em {output_json_path}")
+
+    # Exemplo de como a base de conhecimento poderia ser usada (para demonstração)
+    print("\n--- Exemplo de entradas da Base de Conhecimento Refinada ---")
+    for entry in structured_knowledge[:3]: # Mostrar as primeiras 3 entradas
+        print(json.dumps(entry, ensure_ascii=False, indent=2))
